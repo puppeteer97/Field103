@@ -1,7 +1,7 @@
 // monitor.js — WebSocket + HTTP Polling (Hybrid, ultra-stable)
 // -----------------------------------------------------------------
 // Requirements (in your project):
-//  - "discord.js"
+//  - "discord.js" (v14)
 //  - "axios"
 //  - "express"
 //  - "dotenv"
@@ -39,10 +39,10 @@ app.listen(PORT, () => console.log(`🌐 Health endpoint listening on :${PORT}`)
 // -------------------- HELPERS --------------------
 function safeParseIntFromLabel(label) {
     if (!label) return NaN;
-    // remove emoji and whitespace, accept formats like "11", "11k", "`11`", "❤️11"
+    // remove emoji and keep digits, k, m, decimal
     const s = String(label).replace(/[^0-9kKmM.]/g, "").trim().toLowerCase();
     if (!s) return NaN;
-    // support 1.2k, 1k, 12
+    // support 1.2k, 1k, 12, 2m
     if (s.endsWith("k")) {
         const num = parseFloat(s.slice(0, -1));
         return Number.isFinite(num) ? Math.round(num * 1000) : NaN;
@@ -57,7 +57,6 @@ function safeParseIntFromLabel(label) {
 
 function extractHeartsFromMessage(msg) {
     // msg is Discord message object (gateway) or raw message JSON (from REST)
-    // Message components can have multiple rows; collect all buttons
     try {
         const components = msg.components || [];
         const values = [];
@@ -108,10 +107,7 @@ async function sendPushoverAlert(value, messageId, excerpt = "") {
 // -------------------- PROCESS ALERT LOGIC --------------------
 async function processHeartsFound(maxValue, messageId, excerpt = "") {
     try {
-        if (maxValue <= 150) {
-            // nothing to do
-            return;
-        }
+        if (maxValue <= 150) return;
 
         if (messageId === lastAlertMessageId && maxValue === lastAlertValue) {
             console.log("⏳ Suppressing duplicate alert for same message/value");
@@ -129,13 +125,17 @@ async function processHeartsFound(maxValue, messageId, excerpt = "") {
 }
 
 // -------------------- DISCORD CLIENT (Gateway) --------------------
+// NOTE: do NOT include unknown options like `makeCache` — discord.js v14 will reject them.
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-    makeCache: undefined // use default caching
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
 client.once("ready", () => {
-    console.log(`🤖 Logged in as ${client.user.tag} — Gateway connected`);
+    try {
+        console.log(`🤖 Logged in as ${client.user.tag} — Gateway connected`);
+    } catch (err) {
+        console.log("🤖 Logged in (failed to read tag):", err);
+    }
 });
 
 // shard and lifecycle logs
@@ -161,16 +161,28 @@ client.on("messageCreate", async (msg) => {
     }
 });
 
-// login and reconnect handling
-(async () => {
-    try {
-        await client.login(BOT_TOKEN);
-    } catch (err) {
-        console.error("Failed to login Discord client:", err);
-        // if login fails, keep process alive and keep trying every 30s
-        setTimeout(() => process.exit(1), 60000);
+// -------------------- RESILIENT LOGIN (retry loop) --------------------
+let loginAttempts = 0;
+async function startClientLogin() {
+    while (true) {
+        try {
+            loginAttempts++;
+            console.log(`🔑 Attempting Discord login (attempt ${loginAttempts})`);
+            await client.login(BOT_TOKEN);
+            console.log("🔐 Discord login successful");
+            return;
+        } catch (err) {
+            console.error("❌ Discord login failed:", err?.message || err);
+            // exponential backoff with cap
+            const backoffMs = Math.min(60_000, 2000 * Math.pow(2, Math.min(loginAttempts - 1, 6)));
+            console.log(`⏳ Retrying login in ${backoffMs / 1000}s`);
+            await new Promise(res => setTimeout(res, backoffMs));
+        }
     }
-})();
+}
+startClientLogin().catch(err => {
+    console.error("Fatal login loop error:", err);
+});
 
 // -------------------- HTTP POLLING (fallback) --------------------
 async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
@@ -178,18 +190,13 @@ async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
     try {
         const url = `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=${limit}`;
         const res = await axios.get(url, {
-            headers: {
-                Authorization: `Bot ${BOT_TOKEN}`
-            },
+            headers: { Authorization: `Bot ${BOT_TOKEN}` },
             timeout: 10000
         });
-        // res.data is an array of message objects (raw)
         const msgs = Array.isArray(res.data) ? res.data : [];
-        // filter only messages from the game bot
         return msgs.filter(m => m.author && m.author.id === GAME_BOT_ID);
     } catch (err) {
         const now = Date.now();
-        // log but rate-limit our error logging so it doesn't spam
         if (now - lastPollErrorAt > 30_000) {
             console.error("fetchLatestBotMessagesViaREST error:", err?.response?.data || err.message || err);
             lastPollErrorAt = now;
@@ -201,12 +208,8 @@ async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
 async function pollingLoop() {
     try {
         const msgs = await fetchLatestBotMessagesViaREST();
-        if (!msgs || !msgs.length) {
-            // nothing found — no problem, gateway will handle most cases
-            return;
-        }
+        if (!msgs || !msgs.length) return;
 
-        // check the newest few messages for heart labels
         for (const msg of msgs.slice(0, 5)) {
             const hearts = extractHeartsFromMessage(msg);
             if (!hearts.length) continue;
@@ -229,8 +232,8 @@ process.on("unhandledRejection", (reason, p) => {
 });
 process.on("uncaughtException", (err) => {
     console.error("Uncaught Exception:", err);
-    // Do not exit — keep process alive; log and continue
+    // keep process alive; log and continue
 });
 
 // Final info
-console.log("🚀 Hybrid Heart Monitor initialized. Gateway connected when bot token valid.");
+console.log("🚀 Hybrid Heart Monitor initialized. Gateway will connect when bot token is valid.");
