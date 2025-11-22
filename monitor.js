@@ -1,11 +1,10 @@
 // ==============================
-// monitor.js — Anti-Spam + Value Alerts (Render-Stable)
+// monitor.js — Anti-Spam + Value Alerts + Self-Ping
 // ==============================
 
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,12 +27,18 @@ app.get("/", (req, res) => {
     res.send("✅ Heart Monitor Running");
 });
 
-// extra endpoint pinged by app itself
-app.get("/ping", (req, res) => res.send("pong"));
-
 app.listen(PORT, () => {
     console.log(`🌐 Web server running on port ${PORT}`);
 });
+
+// -------------------------------------------
+// SELF-PING TO PREVENT RENDER SLEEP
+// -------------------------------------------
+setInterval(() => {
+    axios.get(`http://localhost:${PORT}`)
+        .then(() => console.log("🔁 Self-ping OK — staying awake"))
+        .catch(() => console.log("⚠ Self-ping failed"));
+}, 4 * 60 * 1000); // every 4 minutes
 
 // ==========================
 // HEART MONITOR LOGIC BELOW
@@ -58,20 +63,14 @@ async function fetchLatestMessages() {
 
 function parseHeartLabel(label) {
     let val = label.toLowerCase().trim();
-
-    if (val.endsWith("k")) {
-        return Math.round(parseFloat(val.replace("k", "")) * 1000);
-    }
-
+    if (val.endsWith("k")) return Math.round(parseFloat(val.replace("k", "")) * 1000);
     return parseInt(val, 10);
 }
 
 function extractHearts(msg) {
     if (!msg.components?.length) return [];
-
     const row = msg.components[0];
     if (!row.components) return [];
-
     return row.components
         .filter(btn => btn.emoji?.name === "❤️")
         .map(btn => parseHeartLabel(btn.label));
@@ -82,15 +81,15 @@ function extractHearts(msg) {
 // ---------------------------
 async function sendPushoverAlert(value, msgId) {
     try {
-        await axios.post(
-            "https://api.pushover.net/1/messages.json",
-            new URLSearchParams({
+        await fetch("https://api.pushover.net/1/messages.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
                 token: PUSH_TOKEN,
                 user: PUSH_USER,
                 message: `🚨 ALERT: Heart value ${value} detected (above 150)\nMessage ID: ${msgId}`
-            }),
-            { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-        );
+            })
+        });
 
         console.log(`📨 Pushover alert sent! (value ${value})`);
     } catch (err) {
@@ -143,16 +142,6 @@ async function checkLoop() {
     }
 }
 
-// Run monitor every 5 seconds
-setInterval(checkLoop, 5000).unref();
-
-// --------------------------------------
-// SELF-PING EVERY 4 MIN TO KEEP RENDER ALIVE
-// --------------------------------------
-setInterval(() => {
-    https.get(`https://${process.env.RENDER_EXTERNAL_URL}/ping`, (res) => {});
-    console.log("🟢 KEEPALIVE ping sent");
-}, 240000).unref();  // 4 minutes
-
 console.log("🚀 Heart Monitor started (checking every 5 seconds)...");
+setInterval(checkLoop, 5000);
 checkLoop();
