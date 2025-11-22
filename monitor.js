@@ -1,5 +1,5 @@
 // ==============================
-// monitor.js — Anti-Spam + Value Alerts + Self-Ping
+// monitor.js — UptimeRobot-Compatible Version
 // ==============================
 
 require("dotenv").config();
@@ -16,15 +16,17 @@ const GAME_BOT_ID = process.env.GAME_BOT_ID;
 const PUSH_USER = process.env.PUSH_USER;
 const PUSH_TOKEN = process.env.PUSH_TOKEN;
 
-// Memory to prevent repeated alerts
+// Your Render public web URL for UptimeRobot to ping
+const PUBLIC_URL = process.env.PUBLIC_URL;   // <-- add this in Render env
+
 let lastAlertMessageId = null;
 let lastAlertValue = null;
 
 // -------------------------------------------
-// EXPRESS KEEP-ALIVE WEB SERVER FOR RENDER
+// EXPRESS SERVER (UptimeRobot will ping this)
 // -------------------------------------------
 app.get("/", (req, res) => {
-    res.send("✅ Heart Monitor Running");
+    res.send("✅ Heart Monitor Running (UptimeRobot Compatible)");
 });
 
 app.listen(PORT, () => {
@@ -32,13 +34,17 @@ app.listen(PORT, () => {
 });
 
 // -------------------------------------------
-// SELF-PING TO PREVENT RENDER SLEEP
+// OPTIONAL: PUBLIC SELF-PING (keeps Render awake)
 // -------------------------------------------
-setInterval(() => {
-    axios.get(`http://localhost:${PORT}`)
-        .then(() => console.log("🔁 Self-ping OK — staying awake"))
-        .catch(() => console.log("⚠ Self-ping failed"));
-}, 4 * 60 * 1000); // every 4 minutes
+if (PUBLIC_URL) {
+    setInterval(() => {
+        axios.get(PUBLIC_URL)
+            .then(() => console.log("🔁 External self-ping OK"))
+            .catch(() => console.log("⚠ External self-ping FAIL"));
+    }, 4 * 60 * 1000); // 4 minutes
+} else {
+    console.log("⚠ PUBLIC_URL not set — only UptimeRobot will keep service alive");
+}
 
 // ==========================
 // HEART MONITOR LOGIC BELOW
@@ -109,14 +115,11 @@ async function checkLoop() {
         return;
     }
 
-    let allValues = [];
     let highestValue = 0;
     let highestMsgId = null;
 
     for (const msg of msgs) {
         const extracted = extractHearts(msg);
-        allValues.push(...extracted);
-
         const msgMax = Math.max(...extracted);
         if (msgMax > highestValue) {
             highestValue = msgMax;
@@ -124,9 +127,10 @@ async function checkLoop() {
         }
     }
 
-    console.log("❤️ Extracted heart values:", allValues);
+    console.log("❤️ Highest extracted heart:", highestValue);
 
     if (highestValue > 150) {
+
         if (highestMsgId === lastAlertMessageId && highestValue === lastAlertValue) {
             console.log("⏳ Alert suppressed — already sent for this message/value");
             return;
