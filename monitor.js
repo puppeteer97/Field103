@@ -5,7 +5,8 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const fetch = require("node-fetch");
+// ❌ REMOVE node-fetch (Node 18+ has fetch built in)
+// const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,21 +49,18 @@ async function fetchLatestMessages() {
 
         const messages = res.data;
 
-        // Only messages from the game bot
         const botMsgs = messages.filter(msg => msg.author?.id === GAME_BOT_ID);
 
-        return botMsgs.slice(0, 5); // latest 5 bot messages
+        return botMsgs.slice(0, 5);
     } catch (err) {
         console.error("❌ Failed to fetch messages:", err.response?.data || err);
         return [];
     }
 }
 
-// Convert labels like 1k, 2.5k, etc. to numbers
 function parseHeartLabel(label) {
     let val = label.toLowerCase().trim();
 
-    // Convert "1k", "1.2k", "12.7k" to numeric values
     if (val.endsWith("k")) {
         return Math.round(parseFloat(val.replace("k", "")) * 1000);
     }
@@ -70,7 +68,6 @@ function parseHeartLabel(label) {
     return parseInt(val, 10);
 }
 
-// Extract numbers next to ❤️ emoji buttons
 function extractHearts(msg) {
     if (!msg.components?.length) return [];
 
@@ -87,12 +84,11 @@ async function sendPushoverAlert(values) {
     try {
         await fetch("https://api.pushover.net/1/messages.json", {
             method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
                 token: PUSH_TOKEN,
                 user: PUSH_USER,
-                message:
-                    "🚨 ALERT: A heart value is ABOVE 150!\n\nValues: " +
-                    values.join(", ")
+                message: "🚨 ALERT: A heart value is ABOVE 150!\n\nValues: " + values.join(", ")
             })
         });
 
@@ -121,7 +117,6 @@ async function checkLoop() {
 
     console.log("❤️ Extracted heart values:", allValues);
 
-    // Trigger alert when ANY number > 150
     if (allValues.some(v => v > 150)) {
         console.log("🚨 High heart detected — sending alert…");
         await sendPushoverAlert(allValues);
