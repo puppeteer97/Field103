@@ -99,10 +99,10 @@ async function checkLoop() {
 
     console.log("❤️ Heart Values:", allValues);
 
-    if (allValues.some(v => v < 100)) {
+    if (allValues.some(v => v > 100)) {
         await sendPushoverAlert(allValues);
     } else {
-        console.log("✅ All values >= 100");
+        console.log("✅ All values <= 100");
     }
 }
 
@@ -110,3 +110,4 @@ async function checkLoop() {
 console.log("🚀 Heart Monitor running every 5 seconds…");
 checkLoop();
 setInterval(checkLoop, 5000);
+
