@@ -1,10 +1,11 @@
 // ==============================
-// monitor.js — Anti-Spam + Value Alerts
+// monitor.js — Anti-Spam + Value Alerts (Render-Stable)
 // ==============================
 
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
+const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,6 +27,9 @@ let lastAlertValue = null;
 app.get("/", (req, res) => {
     res.send("✅ Heart Monitor Running");
 });
+
+// extra endpoint pinged by app itself
+app.get("/ping", (req, res) => res.send("pong"));
 
 app.listen(PORT, () => {
     console.log(`🌐 Web server running on port ${PORT}`);
@@ -78,15 +82,15 @@ function extractHearts(msg) {
 // ---------------------------
 async function sendPushoverAlert(value, msgId) {
     try {
-        await fetch("https://api.pushover.net/1/messages.json", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
+        await axios.post(
+            "https://api.pushover.net/1/messages.json",
+            new URLSearchParams({
                 token: PUSH_TOKEN,
                 user: PUSH_USER,
                 message: `🚨 ALERT: Heart value ${value} detected (above 150)\nMessage ID: ${msgId}`
-            })
-        });
+            }),
+            { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+        );
 
         console.log(`📨 Pushover alert sent! (value ${value})`);
     } catch (err) {
@@ -114,7 +118,6 @@ async function checkLoop() {
         const extracted = extractHearts(msg);
         allValues.push(...extracted);
 
-        // Track which message contains the high value
         const msgMax = Math.max(...extracted);
         if (msgMax > highestValue) {
             highestValue = msgMax;
@@ -124,10 +127,7 @@ async function checkLoop() {
 
     console.log("❤️ Extracted heart values:", allValues);
 
-    // ---- ALERT CONDITIONS ----
     if (highestValue > 150) {
-        
-        // Anti-spam: Skip if alert already sent for this value & message
         if (highestMsgId === lastAlertMessageId && highestValue === lastAlertValue) {
             console.log("⏳ Alert suppressed — already sent for this message/value");
             return;
@@ -136,7 +136,6 @@ async function checkLoop() {
         console.log(`🚨 High heart detected (${highestValue}) — sending alert…`);
         await sendPushoverAlert(highestValue, highestMsgId);
 
-        // Save state to prevent repeats
         lastAlertMessageId = highestMsgId;
         lastAlertValue = highestValue;
     } else {
@@ -144,7 +143,16 @@ async function checkLoop() {
     }
 }
 
-// Run every 5 seconds
+// Run monitor every 5 seconds
+setInterval(checkLoop, 5000).unref();
+
+// --------------------------------------
+// SELF-PING EVERY 4 MIN TO KEEP RENDER ALIVE
+// --------------------------------------
+setInterval(() => {
+    https.get(`https://${process.env.RENDER_EXTERNAL_URL}/ping`, (res) => {});
+    console.log("🟢 KEEPALIVE ping sent");
+}, 240000).unref();  // 4 minutes
+
 console.log("🚀 Heart Monitor started (checking every 5 seconds)...");
-setInterval(checkLoop, 5000);
 checkLoop();
