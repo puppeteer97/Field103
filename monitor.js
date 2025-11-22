@@ -20,12 +20,13 @@ if (!CHANNEL_ID || !BOT_TOKEN || !GAME_BOT_ID || !PUSH_USER || !PUSH_TOKEN) {
 }
 
 // ------------------------------
-// FETCH UP TO 10 MESSAGES
+// FETCH UP TO 15 MESSAGES
 // ------------------------------
+// (We fetch 20 to be safe and then filter bot messages)
 async function fetchLatestMessages() {
     try {
         const res = await axios.get(
-            `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=10`,
+            `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=20`,
             {
                 headers: { Authorization: `Bot ${BOT_TOKEN}` }
             }
@@ -33,9 +34,12 @@ async function fetchLatestMessages() {
 
         const messages = res.data;
 
+        // Keep only messages sent by the bot
         const botMsgs = messages.filter(m => m.author?.id === GAME_BOT_ID);
 
-        return botMsgs.slice(0, 3); // last 3 bot messages
+        // ✔ return the most recent 5 bot messages
+        return botMsgs.slice(0, 5);
+
     } catch (err) {
         console.error("❌ Failed to fetch messages:", err.response?.data || err);
         return [];
@@ -43,7 +47,7 @@ async function fetchLatestMessages() {
 }
 
 // ------------------------------
-// EXTRACT ❤️ HEART VALUES
+// EXTRACT ❤️ VALUES FROM BUTTONS
 // ------------------------------
 function extractHearts(msg) {
     if (!msg.components?.length) return [];
@@ -67,7 +71,7 @@ async function sendPushoverAlert(values) {
                 token: PUSH_TOKEN,
                 user: PUSH_USER,
                 message:
-                    "⚠ WARNING! One or more heart values dropped below 100.\n\nValues: " +
+                    "🚨 ALERT! One or more heart values are ABOVE 150.\n\nValues: " +
                     values.join(", ")
             })
         });
@@ -87,27 +91,30 @@ async function checkLoop() {
     const msgs = await fetchLatestMessages();
 
     if (!msgs.length) {
-        console.log("⚠ No bot messages found.");
+        console.log("⚠ No recent bot messages found.");
         return;
     }
 
     let allValues = [];
+
     for (const msg of msgs) {
         const values = extractHearts(msg);
         allValues = allValues.concat(values);
     }
 
-    console.log("❤️ Heart Values:", allValues);
+    console.log("❤️ Extracted heart values:", allValues);
 
-    if (allValues.some(v => v > 100)) {
+    // ✔ ALERT condition: ANY value > 150
+    if (allValues.some(v => v > 150)) {
         await sendPushoverAlert(allValues);
     } else {
-        console.log("✅ All values <= 100");
+        console.log("✅ All values ≤ 150");
     }
 }
 
 // ------------------------------
+// START LOOP
+// ------------------------------
 console.log("🚀 Heart Monitor running every 5 seconds…");
 checkLoop();
 setInterval(checkLoop, 5000);
-
