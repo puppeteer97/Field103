@@ -27,8 +27,13 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
 
 // -------------------- STATE --------------------
-let lastAlertMessageId = null;
-let lastAlertValue = null;
+// old single-message logic removed
+// let lastAlertMessageId = null;
+// let lastAlertValue = null;
+
+// NEW: Store all alerted messages so they never re-alert
+const alertedMessages = new Map();
+
 let lastPollErrorAt = 0;
 
 // -------------------- EXPRESS (health endpoint) --------------------
@@ -56,16 +61,13 @@ function safeParseIntFromLabel(label) {
 }
 
 function extractHeartsFromMessage(msg) {
-    // msg is Discord message object (gateway) or raw message JSON (from REST)
     try {
         const components = msg.components || [];
         const values = [];
         for (const row of components) {
             if (!row || !row.components) continue;
             for (const comp of row.components) {
-                // only buttons with heart emoji (some bots use heart emoji)
                 const isHeartEmoji = !!(comp.emoji && String(comp.emoji.name).includes("❤️"));
-                // fallback: if label looks numeric, include it (some bots don't set emoji)
                 const looksNumeric = !!(comp.label && /[0-9]/.test(comp.label));
                 if (!isHeartEmoji && !looksNumeric) continue;
                 const val = safeParseIntFromLabel(comp.label);
@@ -105,27 +107,37 @@ async function sendPushoverAlert(value, messageId, excerpt = "") {
 }
 
 // -------------------- PROCESS ALERT LOGIC --------------------
+// **NEW DUPLICATE-SAFE LOGIC**
 async function processHeartsFound(maxValue, messageId, excerpt = "") {
     try {
         if (maxValue <= 150) return;
 
-        if (messageId === lastAlertMessageId && maxValue === lastAlertValue) {
-            console.log("⏳ Suppressing duplicate alert for same message/value");
+        const previous = alertedMessages.get(messageId);
+
+        // If we already alerted THIS message for THIS value → suppress
+        if (previous && previous === maxValue) {
+            console.log(`⏳ Suppressing repeat alert for message ${messageId} (value ${maxValue})`);
             return;
         }
 
         console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending alert`);
         await sendPushoverAlert(maxValue, messageId, excerpt);
 
-        lastAlertMessageId = messageId;
-        lastAlertValue = maxValue;
+        // Store alert so it never triggers again
+        alertedMessages.set(messageId, maxValue);
+
+        // optional cleanup to prevent memory bloating
+        if (alertedMessages.size > 200) {
+            const oldest = alertedMessages.keys().next().value;
+            alertedMessages.delete(oldest);
+        }
+
     } catch (err) {
         console.error("processHeartsFound error:", err);
     }
 }
 
 // -------------------- DISCORD CLIENT (Gateway) --------------------
-// NOTE: do NOT include unknown options like `makeCache` — discord.js v14 will reject them.
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
@@ -143,7 +155,7 @@ client.on("shardDisconnect", (event, shardId) => console.warn("⚠ shardDisconne
 client.on("shardReconnecting", (shardId) => console.log("♻ shardReconnecting", shardId));
 client.on("shardResume", (shardId) => console.log("🔁 shardResume", shardId));
 
-// message handler (primary real-time detector)
+// message handler (real-time)
 client.on("messageCreate", async (msg) => {
     try {
         if (!msg) return;
@@ -173,7 +185,6 @@ async function startClientLogin() {
             return;
         } catch (err) {
             console.error("❌ Discord login failed:", err?.message || err);
-            // exponential backoff with cap
             const backoffMs = Math.min(60_000, 2000 * Math.pow(2, Math.min(loginAttempts - 1, 6)));
             console.log(`⏳ Retrying login in ${backoffMs / 1000}s`);
             await new Promise(res => setTimeout(res, backoffMs));
@@ -226,13 +237,12 @@ async function pollingLoop() {
 setInterval(pollingLoop, POLL_INTERVAL);
 console.log(`⏱ Polling loop started (every ${POLL_INTERVAL} ms). Gateway + HTTP hybrid active.`);
 
-// -------------------- GRACEFUL ERRORS & LOGGING --------------------
+// -------------------- GRACEFUL ERRORS --------------------
 process.on("unhandledRejection", (reason, p) => {
     console.error("Unhandled Rejection at:", p, "reason:", reason);
 });
 process.on("uncaughtException", (err) => {
     console.error("Uncaught Exception:", err);
-    // keep process alive; log and continue
 });
 
 // Final info
