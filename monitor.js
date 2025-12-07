@@ -27,13 +27,7 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
 
 // -------------------- STATE --------------------
-// old single-message logic removed
-// let lastAlertMessageId = null;
-// let lastAlertValue = null;
-
-// NEW: Store all alerted messages so they never re-alert
 const alertedMessages = new Map();
-
 let lastPollErrorAt = 0;
 
 // -------------------- EXPRESS (health endpoint) --------------------
@@ -44,10 +38,8 @@ app.listen(PORT, () => console.log(`🌐 Health endpoint listening on :${PORT}`)
 // -------------------- HELPERS --------------------
 function safeParseIntFromLabel(label) {
     if (!label) return NaN;
-    // remove emoji and keep digits, k, m, decimal
     const s = String(label).replace(/[^0-9kKmM.]/g, "").trim().toLowerCase();
     if (!s) return NaN;
-    // support 1.2k, 1k, 12, 2m
     if (s.endsWith("k")) {
         const num = parseFloat(s.slice(0, -1));
         return Number.isFinite(num) ? Math.round(num * 1000) : NaN;
@@ -92,7 +84,7 @@ async function sendPushoverAlert(value, messageId, excerpt = "") {
         const payload = new URLSearchParams({
             token: PUSH_TOKEN,
             user: PUSH_USER,
-            message: `🚨 ALERT: Heart value ${value} detected (>${150})\nMessage ID: ${messageId}${excerpt ? `\n\n${excerpt}` : ""}`
+            message: `Value detected: ${value}`
         });
 
         const res = await axios.post("https://api.pushover.net/1/messages.json", payload.toString(), {
@@ -107,14 +99,12 @@ async function sendPushoverAlert(value, messageId, excerpt = "") {
 }
 
 // -------------------- PROCESS ALERT LOGIC --------------------
-// **NEW DUPLICATE-SAFE LOGIC**
 async function processHeartsFound(maxValue, messageId, excerpt = "") {
     try {
-        if (maxValue <= 150) return;
+        if (maxValue <= 250) return;
 
         const previous = alertedMessages.get(messageId);
 
-        // If we already alerted THIS message for THIS value → suppress
         if (previous && previous === maxValue) {
             console.log(`⏳ Suppressing repeat alert for message ${messageId} (value ${maxValue})`);
             return;
@@ -123,10 +113,8 @@ async function processHeartsFound(maxValue, messageId, excerpt = "") {
         console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending alert`);
         await sendPushoverAlert(maxValue, messageId, excerpt);
 
-        // Store alert so it never triggers again
         alertedMessages.set(messageId, maxValue);
 
-        // optional cleanup to prevent memory bloating
         if (alertedMessages.size > 200) {
             const oldest = alertedMessages.keys().next().value;
             alertedMessages.delete(oldest);
@@ -150,7 +138,6 @@ client.once("ready", () => {
     }
 });
 
-// shard and lifecycle logs
 client.on("shardDisconnect", (event, shardId) => console.warn("⚠ shardDisconnect", shardId, event));
 client.on("shardReconnecting", (shardId) => console.log("♻ shardReconnecting", shardId));
 client.on("shardResume", (shardId) => console.log("🔁 shardResume", shardId));
@@ -233,7 +220,6 @@ async function pollingLoop() {
     }
 }
 
-// start polling interval (hybrid mode)
 setInterval(pollingLoop, POLL_INTERVAL);
 console.log(`⏱ Polling loop started (every ${POLL_INTERVAL} ms). Gateway + HTTP hybrid active.`);
 
