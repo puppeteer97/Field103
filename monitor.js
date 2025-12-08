@@ -14,23 +14,24 @@ const { Client, GatewayIntentBits } = require("discord.js");
 
 // -------------------- CONFIG --------------------
 const PORT = process.env.PORT || 3000;
-const CHANNEL_ID = process.env.CHANNEL_ID;   // channel to monitor
-const BOT_TOKEN = process.env.BOT_TOKEN;     // bot token (must be bot token)
-const GAME_BOT_ID = process.env.GAME_BOT_ID; // ID of the bot whose messages we watch
-const PUSH_USER = process.env.PUSH_USER;     // Pushover user
-const PUSH_TOKEN = process.env.PUSH_TOKEN;   // Pushover token
+const CHANNEL_ID = process.env.CHANNEL_ID;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const GAME_BOT_ID = process.env.GAME_BOT_ID;
 
-// polling interval (ms) — adjust if you want; default 5s
+const PUSH_USER = process.env.PUSH_USER;         // original alert user
+const PUSH_TOKEN = process.env.PUSH_TOKEN;
+
+const SECOND_PUSH_USER = process.env.SECOND_PUSH_USER;   // NEW
+const SECOND_PUSH_TOKEN = process.env.SECOND_PUSH_TOKEN; // NEW
+
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
-
-// how many messages to fetch in polling fallback
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
 
 // -------------------- STATE --------------------
 const alertedMessages = new Map();
 let lastPollErrorAt = 0;
 
-// -------------------- EXPRESS (health endpoint) --------------------
+// -------------------- EXPRESS --------------------
 const app = express();
 app.get("/", (req, res) => res.send("✅ Heart Monitor (hybrid)"));
 app.listen(PORT, () => console.log(`🌐 Health endpoint listening on :${PORT}`));
@@ -74,23 +75,27 @@ function extractHeartsFromMessage(msg) {
 }
 
 // -------------------- Pushover --------------------
-async function sendPushoverAlert(value, messageId, excerpt = "") {
-    if (!PUSH_TOKEN || !PUSH_USER) {
-        console.log("⚠ Pushover creds not set — skipping push alert");
+async function sendPushoverAlert(user, token, value) {
+    if (!user || !token) {
+        console.log("⚠ Missing Pushover creds — skipping alert");
         return;
     }
 
     try {
         const payload = new URLSearchParams({
-            token: PUSH_TOKEN,
-            user: PUSH_USER,
+            token,
+            user,
             message: `Value detected: ${value}`
         });
 
-        const res = await axios.post("https://api.pushover.net/1/messages.json", payload.toString(), {
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            timeout: 10000
-        });
+        const res = await axios.post(
+            "https://api.pushover.net/1/messages.json",
+            payload.toString(),
+            {
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                timeout: 10000
+            }
+        );
 
         console.log("📨 Pushover status:", res.status);
     } catch (err) {
@@ -101,23 +106,34 @@ async function sendPushoverAlert(value, messageId, excerpt = "") {
 // -------------------- PROCESS ALERT LOGIC --------------------
 async function processHeartsFound(maxValue, messageId, excerpt = "") {
     try {
-        if (maxValue <= 250) return;
+        // ------------------------------------------------------
+        // ORIGINAL RULE: alert when >250  → send to main user
+        // ------------------------------------------------------
+        if (maxValue > 250) {
+            const previous = alertedMessages.get(messageId);
+            if (previous && previous === maxValue) {
+                console.log(`⏳ Suppressing repeat alert for message ${messageId} (value ${maxValue})`);
+                return;
+            }
 
-        const previous = alertedMessages.get(messageId);
+            console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending alert`);
+            await sendPushoverAlert(PUSH_USER, PUSH_TOKEN, maxValue);
 
-        if (previous && previous === maxValue) {
-            console.log(`⏳ Suppressing repeat alert for message ${messageId} (value ${maxValue})`);
-            return;
+            alertedMessages.set(messageId, maxValue);
+            if (alertedMessages.size > 200) {
+                const oldest = alertedMessages.keys().next().value;
+                alertedMessages.delete(oldest);
+            }
         }
 
-        console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending alert`);
-        await sendPushoverAlert(maxValue, messageId, excerpt);
-
-        alertedMessages.set(messageId, maxValue);
-
-        if (alertedMessages.size > 200) {
-            const oldest = alertedMessages.keys().next().value;
-            alertedMessages.delete(oldest);
+        // ------------------------------------------------------
+        // NEW RULE: send alert to second user if 100 < value < 400
+        // ------------------------------------------------------
+        if (maxValue > 100 && maxValue < 400) {
+            console.log(
+                `🔔 Mid-range value ${maxValue} detected — sending SECONDARY alert`
+            );
+            await sendPushoverAlert(SECOND_PUSH_USER, SECOND_PUSH_TOKEN, maxValue);
         }
 
     } catch (err) {
@@ -127,7 +143,11 @@ async function processHeartsFound(maxValue, messageId, excerpt = "") {
 
 // -------------------- DISCORD CLIENT (Gateway) --------------------
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
 });
 
 client.once("ready", () => {
@@ -138,11 +158,12 @@ client.once("ready", () => {
     }
 });
 
+// Events
 client.on("shardDisconnect", (event, shardId) => console.warn("⚠ shardDisconnect", shardId, event));
 client.on("shardReconnecting", (shardId) => console.log("♻ shardReconnecting", shardId));
 client.on("shardResume", (shardId) => console.log("🔁 shardResume", shardId));
 
-// message handler (real-time)
+// message handler
 client.on("messageCreate", async (msg) => {
     try {
         if (!msg) return;
@@ -160,7 +181,7 @@ client.on("messageCreate", async (msg) => {
     }
 });
 
-// -------------------- RESILIENT LOGIN (retry loop) --------------------
+// -------------------- LOGIN RETRY LOOP --------------------
 let loginAttempts = 0;
 async function startClientLogin() {
     while (true) {
@@ -182,7 +203,7 @@ startClientLogin().catch(err => {
     console.error("Fatal login loop error:", err);
 });
 
-// -------------------- HTTP POLLING (fallback) --------------------
+// -------------------- HTTP POLLING --------------------
 async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
     if (!CHANNEL_ID || !BOT_TOKEN) return [];
     try {
@@ -191,8 +212,10 @@ async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
             headers: { Authorization: `Bot ${BOT_TOKEN}` },
             timeout: 10000
         });
+
         const msgs = Array.isArray(res.data) ? res.data : [];
         return msgs.filter(m => m.author && m.author.id === GAME_BOT_ID);
+
     } catch (err) {
         const now = Date.now();
         if (now - lastPollErrorAt > 30_000) {
@@ -223,7 +246,7 @@ async function pollingLoop() {
 setInterval(pollingLoop, POLL_INTERVAL);
 console.log(`⏱ Polling loop started (every ${POLL_INTERVAL} ms). Gateway + HTTP hybrid active.`);
 
-// -------------------- GRACEFUL ERRORS --------------------
+// -------------------- ERROR HANDLING --------------------
 process.on("unhandledRejection", (reason, p) => {
     console.error("Unhandled Rejection at:", p, "reason:", reason);
 });
