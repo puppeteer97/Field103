@@ -129,7 +129,7 @@ async function processHeartsFound(maxValue, messageId, excerpt = "") {
         // ------------------------------------------------------
         // NEW RULE: send alert to second user if 100 < value < 400
         // ------------------------------------------------------
-        if (maxValue > 100 && maxValue < 400) {
+        if (maxValue > 100 && maxValue < 600) {
             console.log(
                 `🔔 Mid-range value ${maxValue} detected — sending SECONDARY alert`
             );
