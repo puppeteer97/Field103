@@ -1,10 +1,10 @@
 // monitor.js — WebSocket + HTTP Polling (Hybrid, ultra-stable)
 // -----------------------------------------------------------------
-// Requirements (in your project):
-//  - "discord.js" (v14)
-//  - "axios"
-//  - "express"
-//  - "dotenv"
+// Requirements:
+//  - discord.js (v14)
+//  - axios
+//  - express
+//  - dotenv
 // -----------------------------------------------------------------
 
 require("dotenv").config();
@@ -18,17 +18,18 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GAME_BOT_ID = process.env.GAME_BOT_ID;
 
-const PUSH_USER = process.env.PUSH_USER;         // original alert user
+const PUSH_USER = process.env.PUSH_USER;
 const PUSH_TOKEN = process.env.PUSH_TOKEN;
 
-const SECOND_PUSH_USER = process.env.SECOND_PUSH_USER;   // NEW
-const SECOND_PUSH_TOKEN = process.env.SECOND_PUSH_TOKEN; // NEW
+const SECOND_PUSH_USER = process.env.SECOND_PUSH_USER;
+const SECOND_PUSH_TOKEN = process.env.SECOND_PUSH_TOKEN;
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
 
 // -------------------- STATE --------------------
-const alertedMessages = new Map();
+const alertedMessages = new Map();          // primary user suppression
+const alertedMessagesSecond = new Map();   // secondary user suppression
 let lastPollErrorAt = 0;
 
 // -------------------- EXPRESS --------------------
@@ -41,14 +42,16 @@ function safeParseIntFromLabel(label) {
     if (!label) return NaN;
     const s = String(label).replace(/[^0-9kKmM.]/g, "").trim().toLowerCase();
     if (!s) return NaN;
+
     if (s.endsWith("k")) {
-        const num = parseFloat(s.slice(0, -1));
-        return Number.isFinite(num) ? Math.round(num * 1000) : NaN;
+        const n = parseFloat(s.slice(0, -1));
+        return Number.isFinite(n) ? Math.round(n * 1000) : NaN;
     }
     if (s.endsWith("m")) {
-        const num = parseFloat(s.slice(0, -1));
-        return Number.isFinite(num) ? Math.round(num * 1_000_000) : NaN;
+        const n = parseFloat(s.slice(0, -1));
+        return Number.isFinite(n) ? Math.round(n * 1_000_000) : NaN;
     }
+
     const n = parseInt(s, 10);
     return Number.isFinite(n) ? n : NaN;
 }
@@ -57,12 +60,14 @@ function extractHeartsFromMessage(msg) {
     try {
         const components = msg.components || [];
         const values = [];
+
         for (const row of components) {
-            if (!row || !row.components) continue;
+            if (!row?.components) continue;
             for (const comp of row.components) {
-                const isHeartEmoji = !!(comp.emoji && String(comp.emoji.name).includes("❤️"));
-                const looksNumeric = !!(comp.label && /[0-9]/.test(comp.label));
-                if (!isHeartEmoji && !looksNumeric) continue;
+                const hasHeart = comp.emoji && String(comp.emoji.name).includes("❤️");
+                const looksNumeric = comp.label && /[0-9]/.test(comp.label);
+                if (!hasHeart && !looksNumeric) continue;
+
                 const val = safeParseIntFromLabel(comp.label);
                 if (!Number.isNaN(val)) values.push(val);
             }
@@ -74,12 +79,9 @@ function extractHeartsFromMessage(msg) {
     }
 }
 
-// -------------------- Pushover --------------------
+// -------------------- PUSHOVER --------------------
 async function sendPushoverAlert(user, token, value) {
-    if (!user || !token) {
-        console.log("⚠ Missing Pushover creds — skipping alert");
-        return;
-    }
+    if (!user || !token) return;
 
     try {
         const payload = new URLSearchParams({
@@ -88,85 +90,56 @@ async function sendPushoverAlert(user, token, value) {
             message: `Value detected: ${value}`
         });
 
-        const res = await axios.post(
+        await axios.post(
             "https://api.pushover.net/1/messages.json",
             payload.toString(),
-            {
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                timeout: 10000
-            }
+            { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 10000 }
         );
-
-        console.log("📨 Pushover status:", res.status);
     } catch (err) {
-        console.error("❌ Pushover send error:", err?.response?.data || err.message || err);
+        console.error("❌ Pushover error:", err?.response?.data || err.message || err);
     }
 }
 
 // -------------------- PROCESS ALERT LOGIC --------------------
-async function processHeartsFound(maxValue, messageId, excerpt = "") {
+async function processHeartsFound(maxValue, messageId) {
     try {
-        // ------------------------------------------------------
-        // ORIGINAL RULE (UPDATED):
-        // alert when >300 → send to main user
-        // ------------------------------------------------------
-        if (maxValue > 300) { // ⬅ changed from 250 → 300
-            const previous = alertedMessages.get(messageId);
-            if (previous && previous === maxValue) {
-                console.log(`⏳ Suppressing repeat PRIMARY alert for message ${messageId} (value ${maxValue})`);
-                return;
-            }
+        // ---------- PRIMARY (>300) ----------
+        if (maxValue > 300) {
+            const prev = alertedMessages.get(messageId);
+            if (prev !== maxValue) {
+                console.log(`🚨 PRIMARY alert ${maxValue} (msg ${messageId})`);
+                await sendPushoverAlert(PUSH_USER, PUSH_TOKEN, maxValue);
 
-            console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending PRIMARY alert`);
-            await sendPushoverAlert(PUSH_USER, PUSH_TOKEN, maxValue);
-
-            alertedMessages.set(messageId, maxValue);
-            if (alertedMessages.size > 200) {
-                const oldest = alertedMessages.keys().next().value;
-                alertedMessages.delete(oldest);
+                alertedMessages.set(messageId, maxValue);
+                if (alertedMessages.size > 200) {
+                    alertedMessages.delete(alertedMessages.keys().next().value);
+                }
+            } else {
+                console.log(`⏳ PRIMARY suppressed (${maxValue})`);
             }
         }
 
-        // ------------------------------------------------------
-        // SECOND RULE (UNCHANGED RANGE, DUP SUPPRESSION ADDED)
-        // ------------------------------------------------------
+        // ---------- SECONDARY (100–600) ----------
         if (maxValue > 100 && maxValue < 600) {
-            const previousSecond = alertedMessagesSecond.get(messageId);
-            if (previousSecond && previousSecond === maxValue) {
-                console.log(`⏳ Suppressing repeat SECONDARY alert for message ${messageId} (value ${maxValue})`);
-                return;
-            }
+            const prev2 = alertedMessagesSecond.get(messageId);
+            if (prev2 !== maxValue) {
+                console.log(`🔔 SECONDARY alert ${maxValue} (msg ${messageId})`);
+                await sendPushoverAlert(SECOND_PUSH_USER, SECOND_PUSH_TOKEN, maxValue);
 
-            console.log(`🔔 Mid-range value ${maxValue} detected — sending SECONDARY alert`);
-            await sendPushoverAlert(SECOND_PUSH_USER, SECOND_PUSH_TOKEN, maxValue);
-
-            alertedMessagesSecond.set(messageId, maxValue);
-            if (alertedMessagesSecond.size > 200) {
-                const oldest = alertedMessagesSecond.keys().next().value;
-                alertedMessagesSecond.delete(oldest);
+                alertedMessagesSecond.set(messageId, maxValue);
+                if (alertedMessagesSecond.size > 200) {
+                    alertedMessagesSecond.delete(alertedMessagesSecond.keys().next().value);
+                }
+            } else {
+                console.log(`⏳ SECONDARY suppressed (${maxValue})`);
             }
         }
-
-    } catch (err) {
-        console.error("processHeartsFound error:", err);
-    }
-}
-        // ------------------------------------------------------
-        // NEW RULE: send alert to second user if 100 < value < 400
-        // ------------------------------------------------------
-        if (maxValue > 100 && maxValue < 600) {
-            console.log(
-                `🔔 Mid-range value ${maxValue} detected — sending SECONDARY alert`
-            );
-            await sendPushoverAlert(SECOND_PUSH_USER, SECOND_PUSH_TOKEN, maxValue);
-        }
-
     } catch (err) {
         console.error("processHeartsFound error:", err);
     }
 }
 
-// -------------------- DISCORD CLIENT (Gateway) --------------------
+// -------------------- DISCORD CLIENT --------------------
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -175,76 +148,56 @@ const client = new Client({
     ]
 });
 
-client.once("ready", () => {
-    try {
-        console.log(`🤖 Logged in as ${client.user.tag} — Gateway connected`);
-    } catch (err) {
-        console.log("🤖 Logged in (failed to read tag):", err);
-    }
-});
+client.once("ready", () =>
+    console.log(`🤖 Logged in as ${client.user.tag}`)
+);
 
-// Events
-client.on("shardDisconnect", (event, shardId) => console.warn("⚠ shardDisconnect", shardId, event));
-client.on("shardReconnecting", (shardId) => console.log("♻ shardReconnecting", shardId));
-client.on("shardResume", (shardId) => console.log("🔁 shardResume", shardId));
-
-// message handler
 client.on("messageCreate", async (msg) => {
     try {
-        if (!msg) return;
-        if (msg.channelId !== CHANNEL_ID) return;
-        if (!msg.author || msg.author.id !== GAME_BOT_ID) return;
+        if (
+            msg.channelId !== CHANNEL_ID ||
+            msg.author?.id !== GAME_BOT_ID
+        ) return;
 
         const hearts = extractHeartsFromMessage(msg);
         if (!hearts.length) return;
 
         const maxVal = Math.max(...hearts);
-        console.log(`(gateway) ❤️ Detected ${maxVal} in message ${msg.id}`);
-        await processHeartsFound(maxVal, msg.id, msg.content ? msg.content.slice(0, 400) : "");
+        console.log(`(gateway) ❤️ ${maxVal}`);
+        await processHeartsFound(maxVal, msg.id);
     } catch (err) {
-        console.error("messageCreate handler error:", err);
+        console.error("messageCreate error:", err);
     }
 });
 
-// -------------------- LOGIN RETRY LOOP --------------------
-let loginAttempts = 0;
+// -------------------- LOGIN LOOP --------------------
 async function startClientLogin() {
     while (true) {
         try {
-            loginAttempts++;
-            console.log(`🔑 Attempting Discord login (attempt ${loginAttempts})`);
             await client.login(BOT_TOKEN);
             console.log("🔐 Discord login successful");
             return;
         } catch (err) {
-            console.error("❌ Discord login failed:", err?.message || err);
-            const backoffMs = Math.min(60_000, 2000 * Math.pow(2, Math.min(loginAttempts - 1, 6)));
-            console.log(`⏳ Retrying login in ${backoffMs / 1000}s`);
-            await new Promise(res => setTimeout(res, backoffMs));
+            console.error("❌ Login failed, retrying...", err?.message || err);
+            await new Promise(r => setTimeout(r, 5000));
         }
     }
 }
-startClientLogin().catch(err => {
-    console.error("Fatal login loop error:", err);
-});
+startClientLogin();
 
 // -------------------- HTTP POLLING --------------------
 async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
-    if (!CHANNEL_ID || !BOT_TOKEN) return [];
     try {
         const url = `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=${limit}`;
         const res = await axios.get(url, {
             headers: { Authorization: `Bot ${BOT_TOKEN}` },
             timeout: 10000
         });
-
-        const msgs = Array.isArray(res.data) ? res.data : [];
-        return msgs.filter(m => m.author && m.author.id === GAME_BOT_ID);
-
+        return res.data.filter(m => m.author?.id === GAME_BOT_ID);
     } catch (err) {
         const now = Date.now();
         if (now - lastPollErrorAt > 30_000) {
-            console.error("fetchLatestBotMessagesViaREST error:", err?.response?.data || err.message || err);
+            console.error("REST poll error:", err?.message || err);
             lastPollErrorAt = now;
         }
         return [];
@@ -252,33 +205,25 @@ async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
 }
 
 async function pollingLoop() {
-    try {
-        const msgs = await fetchLatestBotMessagesViaREST();
-        if (!msgs || !msgs.length) return;
+    const msgs = await fetchLatestBotMessagesViaREST();
+    for (const msg of msgs.slice(0, 5)) {
+        const hearts = extractHeartsFromMessage(msg);
+        if (!hearts.length) continue;
 
-        for (const msg of msgs.slice(0, 5)) {
-            const hearts = extractHeartsFromMessage(msg);
-            if (!hearts.length) continue;
-            const maxVal = Math.max(...hearts);
-            console.log(`(poll) ❤️ Detected ${maxVal} in message ${msg.id}`);
-            await processHeartsFound(maxVal, msg.id, msg.content ? msg.content.slice(0, 400) : "");
-        }
-    } catch (err) {
-        console.error("pollingLoop error:", err);
+        const maxVal = Math.max(...hearts);
+        console.log(`(poll) ❤️ ${maxVal}`);
+        await processHeartsFound(maxVal, msg.id);
     }
 }
 
 setInterval(pollingLoop, POLL_INTERVAL);
-console.log(`⏱ Polling loop started (every ${POLL_INTERVAL} ms). Gateway + HTTP hybrid active.`);
 
-// -------------------- ERROR HANDLING --------------------
-process.on("unhandledRejection", (reason, p) => {
-    console.error("Unhandled Rejection at:", p, "reason:", reason);
-});
-process.on("uncaughtException", (err) => {
-    console.error("Uncaught Exception:", err);
-});
+// -------------------- SAFETY --------------------
+process.on("unhandledRejection", err =>
+    console.error("Unhandled Rejection:", err)
+);
+process.on("uncaughtException", err =>
+    console.error("Uncaught Exception:", err)
+);
 
-// Final info
-console.log("🚀 Hybrid Heart Monitor initialized. Gateway will connect when bot token is valid.");
-
+console.log("🚀 Hybrid Heart Monitor initialized");
