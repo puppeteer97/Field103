@@ -107,16 +107,17 @@ async function sendPushoverAlert(user, token, value) {
 async function processHeartsFound(maxValue, messageId, excerpt = "") {
     try {
         // ------------------------------------------------------
-        // ORIGINAL RULE: alert when >250  → send to main user
+        // ORIGINAL RULE (UPDATED):
+        // alert when >300 → send to main user
         // ------------------------------------------------------
-        if (maxValue > 250) {
+        if (maxValue > 300) { // ⬅ changed from 250 → 300
             const previous = alertedMessages.get(messageId);
             if (previous && previous === maxValue) {
-                console.log(`⏳ Suppressing repeat alert for message ${messageId} (value ${maxValue})`);
+                console.log(`⏳ Suppressing repeat PRIMARY alert for message ${messageId} (value ${maxValue})`);
                 return;
             }
 
-            console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending alert`);
+            console.log(`🚨 High heart detected: ${maxValue} (message ${messageId}) — sending PRIMARY alert`);
             await sendPushoverAlert(PUSH_USER, PUSH_TOKEN, maxValue);
 
             alertedMessages.set(messageId, maxValue);
@@ -126,6 +127,30 @@ async function processHeartsFound(maxValue, messageId, excerpt = "") {
             }
         }
 
+        // ------------------------------------------------------
+        // SECOND RULE (UNCHANGED RANGE, DUP SUPPRESSION ADDED)
+        // ------------------------------------------------------
+        if (maxValue > 100 && maxValue < 600) {
+            const previousSecond = alertedMessagesSecond.get(messageId);
+            if (previousSecond && previousSecond === maxValue) {
+                console.log(`⏳ Suppressing repeat SECONDARY alert for message ${messageId} (value ${maxValue})`);
+                return;
+            }
+
+            console.log(`🔔 Mid-range value ${maxValue} detected — sending SECONDARY alert`);
+            await sendPushoverAlert(SECOND_PUSH_USER, SECOND_PUSH_TOKEN, maxValue);
+
+            alertedMessagesSecond.set(messageId, maxValue);
+            if (alertedMessagesSecond.size > 200) {
+                const oldest = alertedMessagesSecond.keys().next().value;
+                alertedMessagesSecond.delete(oldest);
+            }
+        }
+
+    } catch (err) {
+        console.error("processHeartsFound error:", err);
+    }
+}
         // ------------------------------------------------------
         // NEW RULE: send alert to second user if 100 < value < 400
         // ------------------------------------------------------
@@ -256,3 +281,4 @@ process.on("uncaughtException", (err) => {
 
 // Final info
 console.log("🚀 Hybrid Heart Monitor initialized. Gateway will connect when bot token is valid.");
+
