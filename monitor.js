@@ -18,14 +18,12 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GAME_BOT_ID = process.env.GAME_BOT_ID;
 
-const PUSH_USER = process.env.PUSH_USER;
-const PUSH_TOKEN = process.env.PUSH_TOKEN;
-
-const SECOND_PUSH_USER = process.env.SECOND_PUSH_USER;
-const SECOND_PUSH_TOKEN = process.env.SECOND_PUSH_TOKEN;
-
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
+
+// -------------------- NTFY --------------------
+const NTFY_PRIMARY_URL = "https://ntfy.sh/puppeteer-sofi";
+const NTFY_SECONDARY_URL = "https://ntfy.sh/puppeteer-mitsu";
 
 // -------------------- STATE --------------------
 const alertedMessages = new Map();          // primary user suppression
@@ -79,24 +77,18 @@ function extractHeartsFromMessage(msg) {
     }
 }
 
-// -------------------- PUSHOVER --------------------
-async function sendPushoverAlert(user, token, value) {
-    if (!user || !token) return;
-
+// -------------------- NTFY SENDERS (REPLACES PUSHOVER) --------------------
+async function sendNtfy(url, value) {
     try {
-        const payload = new URLSearchParams({
-            token,
-            user,
-            message: `Value detected: ${value}`
+        await axios.post(url, `Value detected: ${value}`, {
+            headers: {
+                "Title": "Heart Alert",
+                "Priority": "5"
+            },
+            timeout: 10000
         });
-
-        await axios.post(
-            "https://api.pushover.net/1/messages.json",
-            payload.toString(),
-            { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 10000 }
-        );
     } catch (err) {
-        console.error("❌ Pushover error:", err?.response?.data || err.message || err);
+        console.error("❌ ntfy error:", err?.message || err);
     }
 }
 
@@ -108,7 +100,7 @@ async function processHeartsFound(maxValue, messageId) {
             const prev = alertedMessages.get(messageId);
             if (prev !== maxValue) {
                 console.log(`🚨 PRIMARY alert ${maxValue} (msg ${messageId})`);
-                await sendPushoverAlert(PUSH_USER, PUSH_TOKEN, maxValue);
+                await sendNtfy(NTFY_PRIMARY_URL, maxValue);
 
                 alertedMessages.set(messageId, maxValue);
                 if (alertedMessages.size > 200) {
@@ -124,7 +116,7 @@ async function processHeartsFound(maxValue, messageId) {
             const prev2 = alertedMessagesSecond.get(messageId);
             if (prev2 !== maxValue) {
                 console.log(`🔔 SECONDARY alert ${maxValue} (msg ${messageId})`);
-                await sendPushoverAlert(SECOND_PUSH_USER, SECOND_PUSH_TOKEN, maxValue);
+                await sendNtfy(NTFY_SECONDARY_URL, maxValue);
 
                 alertedMessagesSecond.set(messageId, maxValue);
                 if (alertedMessagesSecond.size > 200) {
