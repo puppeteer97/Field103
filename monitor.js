@@ -22,8 +22,8 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
 
 // -------------------- NTFY --------------------
-const NTFY_PRIMARY_URL = "https://ntfy.sh/puppeteer-sofi";
-const NTFY_SECONDARY_URL = "https://ntfy.sh/mitsuisdiva";
+const NTFY_PRIMARY_URL = "https://ntfy.sh/sofi-wishes";
+const NTFY_SECONDARY_URL = "https://ntfy.sh/mitsu-wishes";
 
 // -------------------- STATE --------------------
 // Track per-message alert state with timestamps (prevents re-alert spam)
@@ -259,3 +259,4 @@ process.on("uncaughtException", err =>
 );
 
 console.log("🚀 Hybrid Heart Monitor initialized (rate-safe)");
+
