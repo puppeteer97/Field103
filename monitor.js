@@ -124,8 +124,8 @@ async function processHeartsFound(maxValue, messageId) {
             return;
         }
 
-        // ---------- PRIMARY (>599) ----------
-        if (maxValue > 599) {
+        // ---------- PRIMARY (>799) ----------
+        if (maxValue > 799) {
             // Only send PRIMARY once per message
             if (!state.primaryAt) {
                 console.log(`🚨 PRIMARY alert ${maxValue} (msg ${messageId})`);
@@ -136,8 +136,8 @@ async function processHeartsFound(maxValue, messageId) {
             }
         }
 
-        // ---------- SECONDARY (100–600) ----------
-        if (maxValue > 100 && maxValue < 600) {
+        // ---------- SECONDARY (100–800) ----------
+        if (maxValue > 100 && maxValue < 800) {
             // Only send SECONDARY once per message
             if (!state.secondaryAt) {
                 console.log(`🔔 SECONDARY alert ${maxValue} (msg ${messageId})`);
@@ -259,4 +259,5 @@ process.on("uncaughtException", err =>
 );
 
 console.log("🚀 Hybrid Heart Monitor initialized (rate-safe)");
+
 
