@@ -1,11 +1,5 @@
 // monitor.js — WebSocket + HTTP Polling (Hybrid, ultra-stable)
 // -----------------------------------------------------------------
-// Requirements:
-//  - discord.js (v14)
-//  - axios
-//  - express
-//  - dotenv
-// -----------------------------------------------------------------
 
 require("dotenv").config();
 const express = require("express");
@@ -17,6 +11,7 @@ const PORT = process.env.PORT || 3000;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GAME_BOT_ID = process.env.GAME_BOT_ID;
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
@@ -26,19 +21,36 @@ const NTFY_PRIMARY_URL = "https://ntfy.sh/sofi-wishes";
 const NTFY_SECONDARY_URL = "https://ntfy.sh/mitsu-wishes";
 
 // -------------------- STATE --------------------
-// Track per-message alert state with timestamps (prevents re-alert spam)
-const alertedState = new Map(); // msgId -> { primaryAt, secondaryAt, lastValue }
-
-// Global ntfy send rate limiter
+const alertedState = new Map();
 let lastNtfySendAt = 0;
-const NTFY_MIN_GAP_MS = 1500; // >= 1.5s between any ntfy sends
-
+const NTFY_MIN_GAP_MS = 1500;
 let lastPollErrorAt = 0;
 
 // -------------------- EXPRESS --------------------
 const app = express();
-app.get("/", (req, res) => res.send("✅ Heart Monitor (hybrid)"));
-app.listen(PORT, () => console.log(`🌐 Health endpoint listening on :${PORT}`));
+
+app.get("/", (req, res) =>
+    res.send("✅ Heart Monitor (Render keep-alive active)")
+);
+
+app.listen(PORT, () =>
+    console.log(`🌐 Health endpoint listening on :${PORT}`)
+);
+
+// -------------------- RENDER KEEP-ALIVE --------------------
+if (RENDER_EXTERNAL_URL) {
+    setInterval(async () => {
+        try {
+            await axios.get(RENDER_EXTERNAL_URL, { timeout: 8000 });
+        } catch (err) {
+            console.error("⚠️ Render keep-alive ping failed:",
+                err?.message || err
+            );
+        }
+    }, 10 * 60 * 1000); // every 10 minutes
+} else {
+    console.warn("⚠️ RENDER_EXTERNAL_URL not set — keep-alive disabled");
+}
 
 // -------------------- HELPERS --------------------
 function sleep(ms) {
@@ -49,118 +61,67 @@ function safeParseIntFromLabel(label) {
     if (!label) return NaN;
     const s = String(label).replace(/[^0-9kKmM.]/g, "").trim().toLowerCase();
     if (!s) return NaN;
-
-    if (s.endsWith("k")) {
-        const n = parseFloat(s.slice(0, -1));
-        return Number.isFinite(n) ? Math.round(n * 1000) : NaN;
-    }
-    if (s.endsWith("m")) {
-        const n = parseFloat(s.slice(0, -1));
-        return Number.isFinite(n) ? Math.round(n * 1_000_000) : NaN;
-    }
-
+    if (s.endsWith("k")) return Math.round(parseFloat(s) * 1000);
+    if (s.endsWith("m")) return Math.round(parseFloat(s) * 1_000_000);
     const n = parseInt(s, 10);
     return Number.isFinite(n) ? n : NaN;
 }
 
 function extractHeartsFromMessage(msg) {
     try {
-        const components = msg.components || [];
         const values = [];
-
-        for (const row of components) {
-            if (!row?.components) continue;
-            for (const comp of row.components) {
-                const hasHeart = comp.emoji && String(comp.emoji.name).includes("❤️");
-                const looksNumeric = comp.label && /[0-9]/.test(comp.label);
-                if (!hasHeart && !looksNumeric) continue;
-
+        for (const row of msg.components || []) {
+            for (const comp of row.components || []) {
+                if (!comp.label) continue;
                 const val = safeParseIntFromLabel(comp.label);
                 if (!Number.isNaN(val)) values.push(val);
             }
         }
         return values;
-    } catch (err) {
-        console.error("extractHeartsFromMessage error:", err);
+    } catch {
         return [];
     }
 }
 
-// -------------------- NTFY SENDERS (RATE-SAFE) --------------------
+// -------------------- NTFY --------------------
 async function sendNtfy(url, value, priority = "5") {
-    const now = Date.now();
-    const delta = now - lastNtfySendAt;
-    if (delta < NTFY_MIN_GAP_MS) {
-        await sleep(NTFY_MIN_GAP_MS - delta);
-    }
-
+    const delta = Date.now() - lastNtfySendAt;
+    if (delta < NTFY_MIN_GAP_MS) await sleep(NTFY_MIN_GAP_MS - delta);
     try {
         await axios.post(url, `Value detected: ${value}`, {
-            headers: {
-                "Title": "Heart Alert",
-                "Priority": priority
-            },
-            timeout: 10000
+            headers: { Title: "Heart Alert", Priority: priority }
         });
-        lastNtfySendAt = Date.now();
     } catch (err) {
         console.error("❌ ntfy error:", err?.message || err);
-        lastNtfySendAt = Date.now(); // still advance to avoid tight retry loops
     }
+    lastNtfySendAt = Date.now();
 }
 
-// -------------------- PROCESS ALERT LOGIC (IDEMPOTENT) --------------------
+// -------------------- ALERT LOGIC --------------------
 async function processHeartsFound(maxValue, messageId) {
-    try {
-        const now = Date.now();
-        const state = alertedState.get(messageId) || {
-            primaryAt: 0,
-            secondaryAt: 0,
-            lastValue: null
-        };
+    const now = Date.now();
+    const state = alertedState.get(messageId) || {
+        primaryAt: 0,
+        secondaryAt: 0,
+        lastValue: null
+    };
+    if (state.lastValue === maxValue) return;
 
-        // Ignore identical value repeats entirely (gateway + poll dedupe)
-        if (state.lastValue === maxValue) {
-            return;
-        }
-
-        // ---------- PRIMARY (>799) ----------
-        if (maxValue > 799) {
-            // Only send PRIMARY once per message
-            if (!state.primaryAt) {
-                console.log(`🚨 PRIMARY alert ${maxValue} (msg ${messageId})`);
-                await sendNtfy(NTFY_PRIMARY_URL, maxValue, "5");
-                state.primaryAt = now;
-            } else {
-                console.log(`⏳ PRIMARY suppressed (${maxValue})`);
-            }
-        }
-
-        // ---------- SECONDARY (100–800) ----------
-        if (maxValue > 100 && maxValue < 800) {
-            // Only send SECONDARY once per message
-            if (!state.secondaryAt) {
-                console.log(`🔔 SECONDARY alert ${maxValue} (msg ${messageId})`);
-                await sendNtfy(NTFY_SECONDARY_URL, maxValue, "3");
-                state.secondaryAt = now;
-            } else {
-                console.log(`⏳ SECONDARY suppressed (${maxValue})`);
-            }
-        }
-
-        state.lastValue = maxValue;
-        alertedState.set(messageId, state);
-
-        // Cap memory
-        if (alertedState.size > 300) {
-            alertedState.delete(alertedState.keys().next().value);
-        }
-    } catch (err) {
-        console.error("processHeartsFound error:", err);
+    if (maxValue > 799 && !state.primaryAt) {
+        await sendNtfy(NTFY_PRIMARY_URL, maxValue, "5");
+        state.primaryAt = now;
     }
+
+    if (maxValue > 100 && maxValue < 800 && !state.secondaryAt) {
+        await sendNtfy(NTFY_SECONDARY_URL, maxValue, "3");
+        state.secondaryAt = now;
+    }
+
+    state.lastValue = maxValue;
+    alertedState.set(messageId, state);
 }
 
-// -------------------- DISCORD CLIENT --------------------
+// -------------------- DISCORD --------------------
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -174,90 +135,45 @@ client.once("ready", () =>
 );
 
 client.on("messageCreate", async (msg) => {
-    try {
-        if (
-            msg.channelId !== CHANNEL_ID ||
-            msg.author?.id !== GAME_BOT_ID
-        ) return;
+    if (msg.channelId !== CHANNEL_ID) return;
+    if (msg.author?.id !== GAME_BOT_ID) return;
 
-        const hearts = extractHeartsFromMessage(msg);
-        if (!hearts.length) return;
+    const hearts = extractHeartsFromMessage(msg);
+    if (!hearts.length) return;
 
-        const maxVal = Math.max(...hearts);
-        console.log(`(gateway) ❤️ ${maxVal}`);
-        await processHeartsFound(maxVal, msg.id);
-    } catch (err) {
-        console.error("messageCreate error:", err);
-    }
+    await processHeartsFound(Math.max(...hearts), msg.id);
 });
 
 // -------------------- LOGIN LOOP --------------------
-async function startClientLogin() {
+(async function loginLoop() {
     while (true) {
         try {
             await client.login(BOT_TOKEN);
-            console.log("🔐 Discord login successful");
             return;
-        } catch (err) {
-            console.error("❌ Login failed, retrying...", err?.message || err);
+        } catch {
             await sleep(5000);
         }
     }
-}
-startClientLogin();
+})();
 
-// -------------------- HTTP POLLING --------------------
-async function fetchLatestBotMessagesViaREST(limit = POLL_MESSAGE_LIMIT) {
+// -------------------- POLLING --------------------
+setInterval(async () => {
+    const url = `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=${POLL_MESSAGE_LIMIT}`;
     try {
-        const url = `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=${limit}`;
         const res = await axios.get(url, {
-            headers: { Authorization: `Bot ${BOT_TOKEN}` },
-            timeout: 10000
+            headers: { Authorization: `Bot ${BOT_TOKEN}` }
         });
-        return res.data.filter(m => m.author?.id === GAME_BOT_ID);
-    } catch (err) {
-        const now = Date.now();
-        if (now - lastPollErrorAt > 30_000) {
-            console.error("REST poll error:", err?.message || err);
-            lastPollErrorAt = now;
+        for (const msg of res.data.filter(m => m.author?.id === GAME_BOT_ID)) {
+            const hearts = extractHeartsFromMessage(msg);
+            if (hearts.length) {
+                await processHeartsFound(Math.max(...hearts), msg.id);
+            }
         }
-        return [];
-    }
-}
-
-async function pollingLoop() {
-    const msgs = await fetchLatestBotMessagesViaREST();
-    for (const msg of msgs.slice(0, 5)) {
-        const hearts = extractHeartsFromMessage(msg);
-        if (!hearts.length) continue;
-
-        const maxVal = Math.max(...hearts);
-        console.log(`(poll) ❤️ ${maxVal}`);
-        await processHeartsFound(maxVal, msg.id);
-    }
-}
-
-setInterval(pollingLoop, POLL_INTERVAL);
-
-// -------------------- CLEANUP --------------------
-// Periodically clean old message states
-setInterval(() => {
-    const now = Date.now();
-    for (const [id, state] of alertedState) {
-        if (now - Math.max(state.primaryAt, state.secondaryAt) > 15 * 60_000) {
-            alertedState.delete(id);
-        }
-    }
-}, 60_000);
+    } catch {}
+}, POLL_INTERVAL);
 
 // -------------------- SAFETY --------------------
-process.on("unhandledRejection", err =>
-    console.error("Unhandled Rejection:", err)
-);
-process.on("uncaughtException", err =>
-    console.error("Uncaught Exception:", err)
-);
+process.on("unhandledRejection", console.error);
+process.on("uncaughtException", console.error);
 
-console.log("🚀 Hybrid Heart Monitor initialized (rate-safe)");
-
-
+console.log("🚀 Render hybrid monitor running (internal HTTP keep-alive enabled)");
