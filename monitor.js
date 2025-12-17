@@ -23,7 +23,7 @@ const POLL_MESSAGE_LIMIT = parseInt(process.env.POLL_MESSAGE_LIMIT || "20", 10);
 
 // -------------------- NTFY --------------------
 const NTFY_PRIMARY_URL = "https://ntfy.sh/puppeteer-sofi";
-const NTFY_SECONDARY_URL = "https://ntfy.sh/mitsu";
+const NTFY_SECONDARY_URL = "https://ntfy.sh/mitsuisdiva";
 
 // -------------------- STATE --------------------
 const alertedMessages = new Map();          // primary user suppression
@@ -219,4 +219,5 @@ process.on("uncaughtException", err =>
 );
 
 console.log("🚀 Hybrid Heart Monitor initialized");
+
 
