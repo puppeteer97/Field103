@@ -26,8 +26,13 @@ const NTFY_PRIMARY_URL = "https://ntfy.sh/puppeteer-sofi";
 const NTFY_SECONDARY_URL = "https://ntfy.sh/mitsuisdiva";
 
 // -------------------- STATE --------------------
-const alertedMessages = new Map();          // primary user suppression
-const alertedMessagesSecond = new Map();   // secondary user suppression
+// Track per-message alert state with timestamps (prevents re-alert spam)
+const alertedState = new Map(); // msgId -> { primaryAt, secondaryAt, lastValue }
+
+// Global ntfy send rate limiter
+let lastNtfySendAt = 0;
+const NTFY_MIN_GAP_MS = 1500; // >= 1.5s between any ntfy sends
+
 let lastPollErrorAt = 0;
 
 // -------------------- EXPRESS --------------------
@@ -36,6 +41,10 @@ app.get("/", (req, res) => res.send("✅ Heart Monitor (hybrid)"));
 app.listen(PORT, () => console.log(`🌐 Health endpoint listening on :${PORT}`));
 
 // -------------------- HELPERS --------------------
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+
 function safeParseIntFromLabel(label) {
     if (!label) return NaN;
     const s = String(label).replace(/[^0-9kKmM.]/g, "").trim().toLowerCase();
@@ -77,35 +86,51 @@ function extractHeartsFromMessage(msg) {
     }
 }
 
-// -------------------- NTFY SENDERS (REPLACES PUSHOVER) --------------------
-async function sendNtfy(url, value) {
+// -------------------- NTFY SENDERS (RATE-SAFE) --------------------
+async function sendNtfy(url, value, priority = "5") {
+    const now = Date.now();
+    const delta = now - lastNtfySendAt;
+    if (delta < NTFY_MIN_GAP_MS) {
+        await sleep(NTFY_MIN_GAP_MS - delta);
+    }
+
     try {
         await axios.post(url, `Value detected: ${value}`, {
             headers: {
                 "Title": "Heart Alert",
-                "Priority": "5"
+                "Priority": priority
             },
             timeout: 10000
         });
+        lastNtfySendAt = Date.now();
     } catch (err) {
         console.error("❌ ntfy error:", err?.message || err);
+        lastNtfySendAt = Date.now(); // still advance to avoid tight retry loops
     }
 }
 
-// -------------------- PROCESS ALERT LOGIC --------------------
+// -------------------- PROCESS ALERT LOGIC (IDEMPOTENT) --------------------
 async function processHeartsFound(maxValue, messageId) {
     try {
+        const now = Date.now();
+        const state = alertedState.get(messageId) || {
+            primaryAt: 0,
+            secondaryAt: 0,
+            lastValue: null
+        };
+
+        // Ignore identical value repeats entirely (gateway + poll dedupe)
+        if (state.lastValue === maxValue) {
+            return;
+        }
+
         // ---------- PRIMARY (>599) ----------
         if (maxValue > 599) {
-            const prev = alertedMessages.get(messageId);
-            if (prev !== maxValue) {
+            // Only send PRIMARY once per message
+            if (!state.primaryAt) {
                 console.log(`🚨 PRIMARY alert ${maxValue} (msg ${messageId})`);
-                await sendNtfy(NTFY_PRIMARY_URL, maxValue);
-
-                alertedMessages.set(messageId, maxValue);
-                if (alertedMessages.size > 200) {
-                    alertedMessages.delete(alertedMessages.keys().next().value);
-                }
+                await sendNtfy(NTFY_PRIMARY_URL, maxValue, "5");
+                state.primaryAt = now;
             } else {
                 console.log(`⏳ PRIMARY suppressed (${maxValue})`);
             }
@@ -113,18 +138,22 @@ async function processHeartsFound(maxValue, messageId) {
 
         // ---------- SECONDARY (100–600) ----------
         if (maxValue > 100 && maxValue < 600) {
-            const prev2 = alertedMessagesSecond.get(messageId);
-            if (prev2 !== maxValue) {
+            // Only send SECONDARY once per message
+            if (!state.secondaryAt) {
                 console.log(`🔔 SECONDARY alert ${maxValue} (msg ${messageId})`);
-                await sendNtfy(NTFY_SECONDARY_URL, maxValue);
-
-                alertedMessagesSecond.set(messageId, maxValue);
-                if (alertedMessagesSecond.size > 200) {
-                    alertedMessagesSecond.delete(alertedMessagesSecond.keys().next().value);
-                }
+                await sendNtfy(NTFY_SECONDARY_URL, maxValue, "3");
+                state.secondaryAt = now;
             } else {
                 console.log(`⏳ SECONDARY suppressed (${maxValue})`);
             }
+        }
+
+        state.lastValue = maxValue;
+        alertedState.set(messageId, state);
+
+        // Cap memory
+        if (alertedState.size > 300) {
+            alertedState.delete(alertedState.keys().next().value);
         }
     } catch (err) {
         console.error("processHeartsFound error:", err);
@@ -171,7 +200,7 @@ async function startClientLogin() {
             return;
         } catch (err) {
             console.error("❌ Login failed, retrying...", err?.message || err);
-            await new Promise(r => setTimeout(r, 5000));
+            await sleep(5000);
         }
     }
 }
@@ -210,6 +239,17 @@ async function pollingLoop() {
 
 setInterval(pollingLoop, POLL_INTERVAL);
 
+// -------------------- CLEANUP --------------------
+// Periodically clean old message states
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, state] of alertedState) {
+        if (now - Math.max(state.primaryAt, state.secondaryAt) > 15 * 60_000) {
+            alertedState.delete(id);
+        }
+    }
+}, 60_000);
+
 // -------------------- SAFETY --------------------
 process.on("unhandledRejection", err =>
     console.error("Unhandled Rejection:", err)
@@ -218,7 +258,4 @@ process.on("uncaughtException", err =>
     console.error("Uncaught Exception:", err)
 );
 
-console.log("🚀 Hybrid Heart Monitor initialized");
-
-
-
+console.log("🚀 Hybrid Heart Monitor initialized (rate-safe)");
