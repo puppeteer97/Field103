@@ -95,8 +95,8 @@ async function sendNtfy(url, value) {
 // -------------------- PROCESS ALERT LOGIC --------------------
 async function processHeartsFound(maxValue, messageId) {
     try {
-        // ---------- PRIMARY (>300) ----------
-        if (maxValue > 300) {
+        // ---------- PRIMARY (>599) ----------
+        if (maxValue > 599) {
             const prev = alertedMessages.get(messageId);
             if (prev !== maxValue) {
                 console.log(`🚨 PRIMARY alert ${maxValue} (msg ${messageId})`);
@@ -219,5 +219,6 @@ process.on("uncaughtException", err =>
 );
 
 console.log("🚀 Hybrid Heart Monitor initialized");
+
 
 
