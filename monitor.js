@@ -112,7 +112,7 @@ async function processHeartsFound(maxValue, messageId) {
         state.primaryAt = now;
     }
 
-    if (maxValue > 100 && maxValue < 800 && !state.secondaryAt) {
+    if (maxValue > 400 && maxValue < 800 && !state.secondaryAt) {
         await sendNtfy(NTFY_SECONDARY_URL, maxValue, "3");
         state.secondaryAt = now;
     }
